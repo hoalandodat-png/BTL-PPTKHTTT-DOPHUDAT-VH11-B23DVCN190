@@ -1,0 +1,24 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:ptit_test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+        format_sql: true
+  flyway:
+    enabled: false
+
+app:
+  seed:
+    enabled: true
+  jwt:
+    secret: test-jwt-secret-key-at-least-64-characters-long-for-hmac-sha256-signing
+    access-token-expiration-ms: 900000
+    refresh-token-expiration-ms: 604800000
+    cookie-secure: false

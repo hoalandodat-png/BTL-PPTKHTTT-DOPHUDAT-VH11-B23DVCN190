@@ -1,0 +1,82 @@
+# GIAI ĐOẠN 8: TEST PLAN & BỘ TEST CASES CHI TIẾT (TESTING & QUALITY ASSURANCE)
+
+> [!NOTE]
+> Tài liệu này thực hiện đầy đủ mục **11 (Testing & Quality Assurance)** và mục **9.3.6 (Kiểm thử Phân quyền & Bảo mật)** của [Planning.md](file:///f:/QUẢN-LÝ-SINH-VIÊN-2/Planning.md#L1022-L1058).
+> Bao gồm Chiến lược kiểm thử 8 mức độ và **35 Test Cases trọng tâm** (tập trung đặc biệt vào các ca lỗi nghiệp vụ, bảo mật RBAC/Data-Scope và xử lý đồng thời).
+
+---
+
+## 1. CHIẾN LƯỢC KIỂM THỬ 8 MỨC ĐỘ (TEST STRATEGY)
+
+| Mức độ kiểm thử | Công cụ sử dụng | Phạm vi & Mục tiêu cụ thể trong dự án |
+|---|---|---|
+| **1. Unit Testing** | `JUnit 5`, `Mockito`, `AssertJ` (Backend); `Vitest` (Frontend) | Kiểm thử cô lập các hàm thuật toán thuần túy: kiểm tra giao đoạn lịch học (`ScheduleConflictValidator`), phát hiện chu trình đồ thị tiên quyết (`PrerequisiteCycleDetector`), công thức tính điểm tổng kết + điểm liệt + GPA/CPA học lại (`GradeCalculatorDomainService`). |
+| **2. Integration Testing** | `Spring Boot Test` + **`Testcontainers (PostgreSQL 17)`** | Kiểm thử tầng `Service` + `Repository` chạy trực tiếp trên PostgreSQL thật trong Docker container: kiểm chứng `@Transactional` rollback, `CHECK` constraints, Partial Unique Index và khóa dòng `SELECT ... FOR UPDATE`. |
+| **3. API Testing** | `MockMvc` / `RestTestClient`, `Swagger UI`, `Postman / Newman` | Kiểm thử toàn bộ hợp đồng REST API (`/api/v1/*`): HTTP Status Code (`200`, `201`, `400`, `401`, `403`, `404`, `409`), cấu trúc JSON trả về và Bean Validation (`@Valid`). |
+| **4. Security Testing** | `Spring Security Test` (`@WithMockUser` / Custom JWT Cookie) | Kiểm thử ma trận phân quyền cho cả 4 vai trò (`ADMIN`, `ACADEMIC_AFFAIRS`, `LECTURER`, `STUDENT`), chống leo thang đặc quyền, chống IDOR, thu hồi Refresh Token khi khóa tài khoản. |
+| **5. Concurrency & Performance Testing** | `CompletableFuture` / `ExecutorService` + `CountDownLatch` (JUnit), `k6` | Giả lập `20–50` luồng đồng thời cùng bấm đăng ký vào 1 lớp học phần chỉ còn 1 suất trống cuối cùng (`49/50`) hoặc cùng 1 sinh viên bấm đúp 2 tab cùng lúc. |
+| **6. System Testing** | Môi trường Docker Compose tích hợp đầy đủ | Kiểm thử luồng nghiệp vụ đầu-cuối (End-to-End Business Flow) xuyên suốt từ lúc mở học kỳ → mở lớp → sinh viên đăng ký → giảng viên nhập & công bố điểm → khóa điểm → tính GPA/CPA. |
+| **7. UI Testing** | `Playwright` + Kiểm thử thủ công trên Chrome DevTools | Kiểm thử giao diện Tiếng Việt, trạng thái loading/disabled nút bấm, hiển thị thông báo lỗi nghiệp vụ và tính tương thích Responsive (`Desktop 1440px` & `Mobile 375px`). |
+| **8. Regression Testing** | `GitHub Actions CI` (`mvn verify` + `npm test`) | Tự động chạy lại toàn bộ bộ Unit + Integration + Security Test sau mỗi lần commit/PR để đảm bảo lát cắt mới không làm hỏng lát cắt cũ. |
+
+---
+
+## 2. BỘ TEST CASES CHI TIẾT (35 TEST CASES TRỌNG TÂM)
+
+### 2.1. Nhóm 1: Kiểm thử Xác thực, Phân quyền RBAC & Data-Scope (`TC-AUTH` — Bắt buộc Mục 9.3.6)
+
+| Test Case ID | Scenario (Kịch bản kiểm thử) | Preconditions | Test Steps | Test Data | Expected Result | Priority |
+|---|---|---|---|---|---|---|
+| `TC-AUTH-01` | Đăng nhập thành công với tài khoản `ACTIVE` | Tài khoản `B22DCCN001` tồn tại, `status = ACTIVE` | 1. Gửi `POST /api/v1/auth/login`<br>2. Kiểm tra Cookie và JSON trả về | `{"usernameOrEmail": "B22DCCN001", "password": "Ptit@12345"}` | `HTTP 200 OK`; Header `Set-Cookie` chứa `access_token` và `refresh_token` có cờ `HttpOnly`; bản ghi mới trong `refresh_tokens` | **High** |
+| `TC-AUTH-02` | Chặn người chưa đăng nhập truy cập API riêng tư | Không có Cookie `access_token` | 1. Gọi `GET /api/v1/students/me` hoặc `POST /api/v1/enrollments` không kèm Cookie | Header Cookie trống | `HTTP 401 UNAUTHORIZED`; không thực thi vào Controller | **High** |
+| `TC-AUTH-03` | Người dùng đã bị khóa (`LOCKED`) không thể đăng nhập hoặc tiếp tục sử dụng hệ thống | User `B22DCCN002` đang có phiên đăng nhập, sau đó Admin khóa tài khoản | 1. Admin gọi `PATCH /api/v1/admin/users/6/status` với `status = LOCKED`<br>2. User `B22DCCN002` gọi `/api/v1/auth/refresh` hoặc `/api/v1/auth/login` | `{"status": "LOCKED", "reason": "Vi phạm quy chế"}` | Toàn bộ `refresh_tokens` của user `6` có `revoked_at != NULL`; cả 2 lệnh của user `6` đều nhận `HTTP 403 AUTH_ACCOUNT_LOCKED`; ghi `AuditLog` | **High** |
+| `TC-AUTH-04` | **Sinh viên không được truy cập API quản lý/nhập điểm** | Đăng nhập bằng tài khoản Sinh viên `B22DCCN001` (`Role = STUDENT`) | 1. Gửi `PUT /api/v1/sections/2/grades` hoặc `POST /api/v1/sections/2/grades/publish` | Payload điểm bất kỳ | `HTTP 403 FORBIDDEN` (`ACCESS_DENIED_RBAC`); dữ liệu bảng `student_grades` không thay đổi | **High** |
+| `TC-AUTH-05` | **Giảng viên không được xem hoặc sửa điểm của lớp không được phân công** | Lớp `sectionId = 2` do `GV001` phụ trách; đăng nhập bằng `GV002` (`Role = LECTURER`) | 1. `GV002` gửi `GET /api/v1/sections/2/grades`<br>2. `GV002` gửi `PUT /api/v1/sections/2/grades` | `sectionId = 2`, tài khoản `GV002` | Cả 2 request đều bị chặn với `HTTP 403 GRADE_NOT_ASSIGNED_LECTURER` (Data-Scope Check tại Backend) | **High** |
+| `TC-AUTH-06` | **Sinh viên không được xem hoặc sửa dữ liệu cá nhân / bảng điểm của sinh viên khác (Chống IDOR)** | Đăng nhập bằng `B22DCCN001` (`studentId = 1`) | 1. Gọi `GET /api/v1/students/2` hoặc `GET /api/v1/students/2/academic-results`<br>2. Gọi `DELETE /api/v1/enrollments/{id_của_SV_2}` | `studentId = 2` (của `B22DCCN002`) | Nhận `HTTP 403 FORBIDDEN`; sinh viên chỉ gọi được `/api/v1/students/me/*` và chỉ hủy được `enrollment` của chính mình | **High** |
+| `TC-AUTH-07` | Sinh viên cố tình gửi trường học vụ (`fullName`, `studentCode`, `majorId`, `academicStatus`) vào API tự cập nhật liên lạc | Đăng nhập bằng `B22DCCN001` | 1. Gửi `PATCH /api/v1/students/me/contact` kèm thêm `"fullName": "Tên Giả", "academicStatus": "GRADUATED"` | `{"phone": "0988111222", "fullName": "Tên Giả", "academicStatus": "GRADUATED"}` | `HTTP 200 OK` chỉ cập nhật `phone = 0988111222`; các trường `fullName` và `academicStatus` trong DB giữ nguyên không đổi (`BR-09`) | **High** |
+
+---
+
+### 2.2. Nhóm 2: Kiểm thử Tổ chức, Sinh viên, Học phần & Xếp lịch Lớp học phần (`TC-ORG`, `TC-CRS`, `TC-SEC`)
+
+| Test Case ID | Scenario (Kịch bản kiểm thử) | Preconditions | Test Steps | Test Data | Expected Result | Priority |
+|---|---|---|---|---|---|---|
+| `TC-ORG-01` | Chặn xóa vật lý Khoa/Ngành/Học phần đã có dữ liệu con tham chiếu | Khoa `CNTT1` đã có Bộ môn `CNPM` và Ngành `DCCN` | Gửi yêu cầu xóa Khoa `CNTT1` | `facultyId = 1` | Hệ thống từ chối xóa vật lý (`ON DELETE RESTRICT` / `HTTP 409`), chỉ cho phép chuyển `status = INACTIVE` (`BR-07`) | **Medium** |
+| `TC-STU-01` | Tạo mới Sinh viên đồng thời tạo tài khoản `User` trong 1 Transaction | Đăng nhập `pdt01` (`ACADEMIC_AFFAIRS`) | Gửi `POST /api/v1/students` với thông tin hợp lệ | `studentCode = "B22DCCN099", email = "b22dccn099@stu.ptit-demo.vn", nationalId = "001204000099"` | `HTTP 201`; tạo đồng bộ 1 dòng `users`, 1 dòng `user_roles (STUDENT)`, 1 dòng `students` và 1 dòng `student_status_history` | **High** |
+| `TC-STU-02` | Rollback toàn bộ khi Import Excel Sinh viên có 1 dòng lỗi (All-or-Nothing) | File Excel có 50 dòng, trong đó dòng 35 bị trùng `nationalId` | Gửi `POST /api/v1/students/import?dryRun=false` | File `students_50_rows_1_error.xlsx` | `HTTP 400 IMPORT_VALIDATION_FAILED`; trả về lỗi chính xác tại dòng 35; **0** sinh viên nào trong 50 dòng được lưu vào DB (`BR-32`) | **High** |
+| `TC-CRS-01` | Chặn tạo Học phần có tổng trọng số thành phần điểm khác 100% | Đăng nhập `pdt01` | Gửi `POST /api/v1/courses` với 3 đầu điểm có trọng số `10% + 20% + 50% = 80%` | `weightPercent: [10, 20, 50]` | `HTTP 400 GRADE_WEIGHT_SUM_NOT_100` (`BR-28`) | **High** |
+| `TC-CRS-02` | Phát hiện và chặn thiết lập điều kiện Tiên quyết tạo chu trình (`A → B → A`) | Đã có `INT1306` cần tiên quyết là `INT1154` (`1 → 2`) | Gửi `PUT /api/v1/courses/1/prerequisites` đặt `INT1154` cần tiên quyết là `INT1306` | `courseId = 1, prerequisiteCourseId = 2` | Thuật toán DFS phát hiện chu trình và trả `HTTP 400 PREREQUISITE_CYCLE_DETECTED` (`BR-12`) | **High** |
+| `TC-SEC-01` | Chặn mở Lớp học phần có sĩ số tối đa vượt sức chứa Phòng học | Phòng `LAB-301-A3` có `capacity = 40` | Mở lớp học phần có `maxCapacity = 60` xếp vào phòng `LAB-301-A3` | `maxCapacity = 60, classroomId = 3` | `HTTP 400 CLASSROOM_CAPACITY_EXCEEDED` (`BR-16`) | **High** |
+| `TC-SEC-02` | **Chặn xếp trùng lịch Phòng học** (giao đoạn tuần và giao đoạn tiết) | Lớp `INT1306-20261-01` đã xếp tại phòng `401-A2`, Thứ 2, Tiết `1–3`, Tuần `1–15` | Mở lớp mới xếp tại phòng `401-A2`, Thứ 2, Tiết `3–5` (trùng Tiết 3), Tuần `10–15` (giao Tuần 10–15) | `classroomId = 1, dayOfWeek = 2, startPeriod = 3, endPeriod = 5, startWeek = 10, endWeek = 15` | `HTTP 409 SCHEDULE_CLASSROOM_CONFLICT` chỉ rõ trùng với lớp `INT1306-20261-01` (`BR-15`, `BR-16`) | **High** |
+| `TC-SEC-03` | **Chặn phân công trùng lịch Giảng viên** | `GV001` đang dạy lớp `INT1306-20261-01` vào Thứ 2, Tiết `1–3`, Tuần `1–15` (phòng `401-A2`) | Mở lớp khác tại phòng `402-A2` (khác phòng) nhưng gán cho `GV001` dạy Thứ 2, Tiết `2–4`, Tuần `1–15` | `lecturerId = 1, classroomId = 2, dayOfWeek = 2, startPeriod = 2, endPeriod = 4` | `HTTP 409 SCHEDULE_LECTURER_CONFLICT` (`BR-17`) | **High** |
+
+---
+
+### 2.3. Nhóm 3: Kiểm thử Nghiệp vụ Đăng ký Học phần & Xử lý Đồng thời (`TC-ENR` — Trọng tâm)
+
+| Test Case ID | Scenario (Kịch bản kiểm thử) | Preconditions | Test Steps | Test Data | Expected Result | Priority |
+|---|---|---|---|---|---|---|
+| `TC-ENR-01` | Đăng ký học phần thành công khi thỏa mãn toàn bộ 7 điều kiện | SV `B22DCCN001` (`ACTIVE`), kỳ `20261` đang mở ĐK, lớp `INT1313-20261-01` (`sectionId = 3`) còn chỗ, không trùng lịch | SV gọi `POST /api/v1/enrollments` với `{"sectionId": 3}` | `sectionId = 3` | `HTTP 201 CREATED`; tạo dòng `enrollments (status='ENROLLED')`; `course_sections.current_enrolled` tăng thêm `1` | **High** |
+| `TC-ENR-02` | **Chặn đăng ký khi chưa đủ điều kiện môn Tiên quyết (`PREREQUISITE`)** | Môn `INT1306` yêu cầu tiên quyết `INT1154`; SV `B22DCCN002` **chưa từng học** (hoặc bị điểm `F`) môn `INT1154` | SV `B22DCCN002` gọi `POST /api/v1/enrollments` vào lớp `INT1306-20261-01` (`sectionId = 2`) | `student = B22DCCN002, sectionId = 2` | `HTTP 400 ENROLL_PREREQUISITE_NOT_MET` kèm thông báo `"Chưa đạt học phần tiên quyết: INT1154 - Tin học cơ sở 2"` (`BR-22`) | **High** |
+| `TC-ENR-03` | **Chặn đăng ký khi Sinh viên đang Bảo lưu (`ON_LEAVE`) hoặc Đình chỉ (`SUSPENDED`)** | SV `B22DCCN002` có `academic_status = 'ON_LEAVE'` | SV `B22DCCN002` gọi `POST /api/v1/enrollments` | `sectionId = 3` | `HTTP 403 ENROLL_STUDENT_NOT_ACTIVE` (`BR-19`) | **High** |
+| `TC-ENR-04` | **Chặn đăng ký khi ngoài thời gian mở Đợt đăng ký** | Học kỳ có `is_registration_open = false` hoặc `NOW() > registration_end_at` | SV gọi `POST /api/v1/enrollments` | `sectionId = 3` | `HTTP 400 ENROLL_PERIOD_CLOSED` (`BR-20`) | **High** |
+| `TC-ENR-05` | **Chặn đăng ký trùng học phần trong cùng học kỳ (kể cả khác nhóm lớp)** | SV `B22DCCN001` đã `ENROLLED` vào nhóm 01 (`INT1306-20261-01`) | SV `B22DCCN001` tiếp tục bấm đăng ký vào nhóm 02 (`INT1306-20261-02`) của cùng môn `INT1306` | `courseId = 2`, nhóm 02 | `HTTP 409 ENROLL_DUPLICATE_COURSE_IN_SEMESTER` (được bảo vệ bởi cả Service và Partial Unique Index `uq_enrollments_active_course_semester`) (`BR-21`) | **High** |
+| `TC-ENR-06` | **Chặn đăng ký khi trùng lịch học với lớp đã đăng ký** | SV `B22DCCN001` đã đăng ký lớp học Thứ 2, Tiết `1–3`, Tuần `1–15` | SV đăng ký thêm lớp môn khác có lịch học Thứ 2, Tiết `2–4`, Tuần `8–15` | Giao tại Thứ 2, Tiết `2–3`, Tuần `8–15` | `HTTP 409 ENROLL_SCHEDULE_CONFLICT` chỉ rõ trùng với lớp nào (`BR-24`) | **High** |
+| `TC-ENR-07` | **Chặn đăng ký khi vượt quá số tín chỉ tối đa của học kỳ (`max_credits = 24`)** | SV đã đăng ký `22` tín chỉ trong kỳ `20261` | SV đăng ký thêm 1 môn `3` tín chỉ (`22 + 3 = 25 > 24`) | `currentCredits = 22, newCourseCredits = 3, maxCredits = 24` | `HTTP 400 ENROLL_MAX_CREDITS_EXCEEDED` (`BR-23`) | **High** |
+| `TC-ENR-08` | **Chặn đăng ký khi lớp học phần đã đủ sĩ số (`current_enrolled == max_capacity`)** | Lớp có `max_capacity = 50, current_enrolled = 50` | SV gọi `POST /api/v1/enrollments` | `sectionId` đã đầy | `HTTP 409 ENROLL_SECTION_FULL` (`BR-25`) | **High** |
+| `TC-ENR-09` | **Kiểm thử đồng thời (Race Condition): 20 sinh viên cùng bấm đăng ký vào 1 suất trống cuối cùng (`49/50`)** | Lớp có `max_capacity = 50, current_enrolled = 49`; 20 sinh viên hợp lệ cùng gửi request tại cùng thời điểm thông qua `CountDownLatch` | Thực thi 20 thread gọi `POST /api/v1/enrollments` đồng thời trên PostgreSQL Testcontainers | 20 concurrent requests vào cùng `sectionId` | Nhờ khóa dòng `SELECT ... FOR UPDATE`: đúng **01** request nhận `HTTP 201 CREATED`, đúng **19** request nhận `HTTP 409 ENROLL_SECTION_FULL`; `current_enrolled` trong DB bằng đúng **`50`** (không vượt quá `50`, `0` lỗi `500`) | **High** |
+| `TC-ENR-10` | Hủy đăng ký học phần trong đợt mở và đăng ký lại | SV đang `ENROLLED` tại lớp `sectionId = 3` (`current_enrolled = 10`) | 1. SV gọi `DELETE /api/v1/enrollments/{id}`<br>2. Kiểm tra DB rồi gọi `POST /api/v1/enrollments` đăng ký lại | `sectionId = 3` | Sau bước 1: `status = 'CANCELLED'` (không bị xóa khỏi DB), `current_enrolled = 9`. Sau bước 2: `status = 'ENROLLED'`, `current_enrolled = 10` (`BR-26`) | **High** |
+
+---
+
+### 2.4. Nhóm 4: Kiểm thử Quản lý Điểm, Điểm liệt, Vòng đời Điểm & Tính GPA/CPA (`TC-GRD`)
+
+| Test Case ID | Scenario (Kịch bản kiểm thử) | Preconditions | Test Steps | Test Data | Expected Result | Priority |
+|---|---|---|---|---|---|---|
+| `TC-GRD-01` | Chặn nhập điểm ngoài khoảng `[0.0, 10.0]` | `GV001` nhập điểm cho lớp `sectionId = 2` (`DRAFT`) | Gửi `PUT /api/v1/sections/2/grades` với điểm `10.5` hoặc `-0.5` | `score = 10.5` | `HTTP 400 INVALID_SCORE_RANGE`; Transaction rollback (`BR-28`) | **High** |
+| `TC-GRD-02` | Tính điểm tổng kết chuẩn xác và quy đổi điểm chữ / hệ 4 | Môn có trọng số `10% - 20% - 20% - 50%` | Nhập điểm: Chuyên cần `9.0`, Thực hành `8.0`, Giữa kỳ `8.5`, Cuối kỳ `8.5` | `[9.0, 8.0, 8.5, 8.5]` | `final_score_10 = 8.5`, `letter_grade = 'A'`, `gpa_score_4 = 4.00`, `is_passed = true` (`BR-29`) | **High** |
+| `TC-GRD-03` | **Xử lý Điểm liệt cuối kỳ (`< 4.0`):** trượt môn dù trung bình trọng số `>= 4.0` | Trọng số `10% - 20% - 20% - 50%`, ngưỡng liệt cuối kỳ `min_threshold = 4.0` | Nhập điểm: Chuyên cần `10.0`, Thực hành `10.0`, Giữa kỳ `10.0`, Cuối kỳ `3.5` | Trung bình trọng số = `6.8`, nhưng Cuối kỳ = `3.5 < 4.0` | Hệ thống gán `final_score_10 = 6.8`, nhưng **`letter_grade = 'F'`, `gpa_score_4 = 0.00`, `is_passed = false`** (`BR-29`) | **High** |
+| `TC-GRD-04` | Ẩn điểm đối với Sinh viên khi bảng điểm lớp đang ở trạng thái `DRAFT` | `GV001` đã lưu nháp điểm nhưng chưa bấm Công bố (`grade_status = 'DRAFT'`) | Sinh viên `B22DCCN001` gọi `GET /api/v1/students/me/academic-results` | `grade_status = 'DRAFT'` | Môn học hiển thị trạng thái `"Chưa công bố"`, không lộ điểm nháp cho sinh viên (`BR-30`) | **High** |
+| `TC-GRD-05` | Chặn Giảng viên tự sửa điểm sau khi đã Công bố (`PUBLISHED`) hoặc Khóa (`LOCKED`) | Lớp `sectionId = 2` đã chuyển sang `grade_status = 'PUBLISHED'` | `GV001` gọi `PUT /api/v1/sections/2/grades` để sửa lại điểm | `grade_status = 'PUBLISHED'` | `HTTP 400 GRADE_ALREADY_PUBLISHED_OR_LOCKED` (`BR-30`) | **High** |
+| `TC-GRD-06` | Phòng đào tạo điều chỉnh điểm sau khi khóa (Override) bắt buộc có lý do và ghi `AuditLog` | Lớp đã `LOCKED`; đăng nhập `pdt01` | Gọi `PATCH /api/v1/enrollments/1/grades/override` kèm lý do `"Điều chỉnh theo biên bản phúc khảo số 12/PK"` | Điểm cuối kỳ từ `7.0` → `8.0`, kèm `reason` | Cập nhật điểm tổng kết mới; tạo bản ghi trong `audit_logs` lưu rõ `old_value_json`, `new_value_json`, `actor_user_id` và `reason` (`BR-30`, `BR-32`) | **High** |
+| `TC-GRD-07` | **Tính CPA tích lũy khi Học lại / Học cải thiện (chỉ lấy lần học có điểm cao nhất)** | SV học môn `INT1154` (3 TC) ở kỳ 1 bị `F (0.00)`, học lại môn `INT1154` ở kỳ 2 đạt `B (3.00)`, và học môn `INT1306` (3 TC) ở kỳ 2 đạt `A (4.00)` | Gọi `GET /api/v1/students/me/academic-results` | 2 lần học của `INT1154` (`0.00` và `3.00`) + 1 lần `INT1306` (`4.00`) | • `GPA kỳ 1` = `0.00`<br>• `GPA kỳ 2` = `(3.00×3 + 4.00×3) / 6 = 3.50`<br>• **`CPA toàn khóa`** = `(3.00×3 + 4.00×3) / 6 = 3.50` (bỏ lần `F` của `INT1154`)<br>• **Tổng tín chỉ tích lũy** = `6` tín chỉ (`BR-31`) | **High** |
